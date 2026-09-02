@@ -1,0 +1,7 @@
+{
+  // Drop these two lines into ~/.config/opencode/opencode.json (or .jsonc) to make the
+  // PAT-backed Copilot provider the default. Any id printed by `opencode models | grep copilot-pat/` works.
+  "$schema": "https://opencode.ai/config.json",
+  "model": "copilot-pat/gpt-4.1",
+  "small_model": "copilot-pat/gpt-4.1"
+}
