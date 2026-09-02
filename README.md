@@ -20,6 +20,8 @@ TypeScript with no dependencies, so it should work anywhere OpenCode runs.
 | `install.sh` | macOS/Linux installer: copies the plugin, stores the token, runs a test |
 | `opencode.example.jsonc` | the two config lines that make it the default model |
 
+Quick path on a new machine: `gh repo clone param087/opencode-copilot-pat && cd opencode-copilot-pat && ./install.sh`.
+
 ## Prerequisites
 
 - OpenCode 1.3 or newer on `PATH` (`opencode --version`).
@@ -48,7 +50,7 @@ when they have the `copilot` scope.
 ### macOS / Linux (scripted)
 
 ```sh
-git clone https://github.com/param087/opencode-copilot-pat.git
+gh repo clone param087/opencode-copilot-pat   # private repo: sign in with `gh auth login` first
 cd opencode-copilot-pat
 ./install.sh                      # prompts for the token, input hidden
 # or non-interactive:
