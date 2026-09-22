@@ -171,6 +171,132 @@ async function loadCatalogue(): Promise<Record<string, ModelsDevModel>> {
     "gpt-4.1": stub("GPT-4.1"),
     "claude-sonnet-4.5": stub("Claude Sonnet 4.5", 200000, 64000),
     "claude-haiku-4.5": stub("Claude Haiku 4.5", 200000, 64000),
+    "claude-sonnet-5": stub("Claude Sonnet 5", 200000, 64000),
+    "claude-opus-5": stub("Claude Opus 5", 200000, 64000),
+    "claude-opus-5.5": stub("Claude Opus 5.5", 200000, 64000),
+  }
+}
+
+const DEFAULT_CONTEXT = 128000
+const DEFAULT_OUTPUT = 16000
+
+/**
+ * Build a catalogue entry from a Copilot `/models` item, for models the catalogue
+ * has not caught up with yet (models.dev lags behind new Copilot releases).
+ */
+function fromApiModel(m: any): ModelsDevModel {
+  const caps = m?.capabilities ?? {}
+  const limits = caps.limits ?? {}
+  const supports = caps.supports ?? {}
+  const vision = supports.vision ?? !!limits.vision
+  return {
+    name: m.name ?? m.id,
+    family: caps.family,
+    attachment: vision,
+    reasoning: !!(supports.thinking || supports.adaptive_thinking || supports.reasoning_effort),
+    temperature: supports.temperature ?? true,
+    tool_call: supports.tool_calls ?? true,
+    modalities: { input: vision ? ["text", "image"] : ["text"], output: ["text"] },
+    limit: {
+      // max_context_window_tokens counts prompt + output; max_prompt_tokens is the
+      // input budget, which is what OpenCode means by "context".
+      context: limits.max_prompt_tokens ?? limits.max_context_window_tokens ?? DEFAULT_CONTEXT,
+      output: limits.max_output_tokens ?? DEFAULT_OUTPUT,
+    },
+  }
+}
+
+/** Chat-capable models this account can use right now, keyed by id. */
+function usableApiModels(body: any): { usable: Map<string, any>; disabled: string[] } {
+  const usable = new Map<string, any>()
+  const disabled: string[] = []
+  for (const m of body?.data ?? []) {
+    if (!m?.id) continue
+    // Non-chat models (embeddings, completions) cannot back an OpenCode model.
+    if (m.capabilities?.type && m.capabilities.type !== "chat") continue
+    // Models whose policy is "disabled" need a one-time enable (VS Code model picker or
+    // GitHub Copilot settings) before the API will serve them, so hide them.
+    if (m.policy?.state === "disabled") {
+      disabled.push(m.id)
+      continue
+    }
+    usable.set(m.id, m)
+  }
+  return { usable, disabled }
+}
+
+type Discovery = { usable: Map<string, any>; disabled: string[]; mode: Mode }
+const discoveries = new Map<string, Promise<Discovery | null>>()
+
+/** GET /models, once per process per key. Returns null if the key is unusable or the call fails. */
+function discover(key: string): Promise<Discovery | null> {
+  let pending = discoveries.get(key)
+  if (pending) return pending
+  pending = (async () => {
+    const { token, mode } = await bearerFor(key)
+    const res = await fetch(`${API_URL}/models`, { headers: copilotHeaders(token, mode) })
+    if (!res.ok) {
+      const body = await res.text()
+      throw new Error(explainUpstream(res.status, body, key) ?? `HTTP ${res.status} ${body.slice(0, 120)}`)
+    }
+    const { usable, disabled } = usableApiModels(await res.json())
+    return usable.size ? { usable, disabled, mode } : null
+  })().catch((e) => {
+    log(`model discovery skipped: ${e instanceof Error ? e.message : e}`, "warn")
+    return null
+  })
+  discoveries.set(key, pending)
+  return pending
+}
+
+/**
+ * The stored PAT, read straight from auth.json. The `config` hook runs before
+ * OpenCode hands the plugin any auth context, so there is no other way to reach it.
+ */
+async function storedKey(): Promise<string | null> {
+  const dir = process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share")
+  try {
+    const auth = JSON.parse(await readFile(join(dir, "opencode", "auth.json"), "utf8"))
+    const entry = auth?.[PROVIDER_ID]
+    return entry?.type === "api" && entry.key ? entry.key : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Catalogue entries the account can use, plus any chat models the API offers that
+ * the catalogue has not caught up with. Falls back to the plain catalogue.
+ */
+function reconcile(catalogue: Record<string, ModelsDevModel>, found: Discovery | null) {
+  const models: Record<string, any> = {}
+  if (!found) {
+    for (const [id, m] of Object.entries(catalogue)) models[id] = toConfigModel(m)
+    return { models, added: [] as string[], disabled: [] as string[] }
+  }
+  for (const [id, m] of Object.entries(catalogue)) if (found.usable.has(id)) models[id] = toConfigModel(m)
+  const added: string[] = []
+  for (const [id, m] of found.usable) {
+    if (models[id]) continue
+    // The API also lists retired and internal models. Only offer the ones
+    // GitHub itself puts in front of users.
+    if (!m.model_picker_enabled) continue
+    models[id] = toConfigModel({ ...fromApiModel(m), cost: inheritCost(id, catalogue) })
+    added.push(id)
+  }
+  return { models, added, disabled: found.disabled }
+}
+
+const ZERO_COST = { input: 0, output: 0, cache_read: 0, cache_write: 0 }
+
+/** models.dev prices, in USD per million tokens. Absent for API-discovered models. */
+function toCost(cost: any) {
+  if (!cost) return ZERO_COST
+  return {
+    input: cost.input ?? 0,
+    output: cost.output ?? 0,
+    cache_read: cost.cache_read ?? 0,
+    cache_write: cost.cache_write ?? 0,
   }
 }
 
@@ -186,12 +312,36 @@ function toConfigModel(m: ModelsDevModel) {
     modalities: m.modalities,
     limit: m.limit,
     release_date: m.release_date,
-    // Copilot is subscription-billed (premium requests); per-token cost is not meaningful.
-    cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
+    // Copilot bills premium requests, not tokens, so these prices are the underlying
+    // vendor's list rates from models.dev — useful for comparing models, not a bill.
+    cost: toCost(m.cost),
   }
 }
 
-export const CopilotPatPlugin: Plugin = async (input) => {
+/**
+ * A newly released model has no models.dev entry, so no prices. Borrow them from the
+ * closest catalogue sibling — the entry sharing the longest id prefix, e.g.
+ * `claude-opus-5.5` from `claude-opus-5`. Approximate by construction, but a far better
+ * estimate than zero, and only ever used for models the catalogue does not cover.
+ */
+function inheritCost(id: string, catalogue: Record<string, ModelsDevModel>) {
+  const commonPrefix = (a: string, b: string) => {
+    let i = 0
+    while (i < a.length && i < b.length && a[i] === b[i]) i++
+    return i
+  }
+  let best: { cost: any; score: number } | null = null
+  for (const [otherId, m] of Object.entries(catalogue)) {
+    if (!m.cost) continue
+    const score = commonPrefix(id, otherId)
+    // Require a real family match, not an incidental "g"/"c" overlap.
+    if (score < 5) continue
+    if (!best || score > best.score) best = { cost: m.cost, score }
+  }
+  return best?.cost
+}
+
+export const CopilotPatPlugin: Plugin = async (input: any) => {
   clientLog = (level, message) => {
     try {
       void input.client.app.log({ body: { service: "copilot-pat", level, message } }).catch(() => {})
@@ -200,10 +350,14 @@ export const CopilotPatPlugin: Plugin = async (input) => {
   return {
     async config(config: any) {
       trace("config hook: start")
-      const catalogue = await loadCatalogue()
-      trace(`config hook: catalogue ${Object.keys(catalogue).length} models`)
-      const models: Record<string, any> = {}
-      for (const [id, m] of Object.entries(catalogue)) models[id] = toConfigModel(m)
+      const key = await storedKey()
+      const [catalogue, found] = await Promise.all([loadCatalogue(), key ? discover(key) : null])
+      const { models, added, disabled } = reconcile(catalogue, found)
+      trace(`config hook: ${Object.keys(models).length} models, ${added.length} from API`)
+      if (found)
+        log(`${Object.keys(models).length} models usable on this account (${found.mode} mode)` +
+          (added.length ? `; ${added.length} newer than the catalogue: ${added.join(", ")}` : "") +
+          (disabled.length ? `; ${disabled.length} hidden until enabled in Copilot settings: ${disabled.join(", ")}` : ""))
       config.provider ??= {}
       const existing = config.provider[PROVIDER_ID] ?? {}
       config.provider[PROVIDER_ID] = {
@@ -218,35 +372,21 @@ export const CopilotPatPlugin: Plugin = async (input) => {
 
     provider: {
       id: PROVIDER_ID,
-      // Trim the catalogue to what this account can actually use.
+      // The config hook already reconciled the catalogue against /models using the
+      // stored key. Redo it here with the auth context, which is authoritative and
+      // also covers keys the config hook could not read.
       async models(provider: any, ctx: any) {
         trace(`models hook: auth=${ctx?.auth?.type}`)
         if (ctx?.auth?.type !== "api") return provider.models
-        try {
-          const { token, mode } = await bearerFor(ctx.auth.key)
-          const res = await fetch(`${API_URL}/models`, { headers: copilotHeaders(token, mode) })
-          if (!res.ok) {
-            const body = await res.text()
-            throw new Error(explainUpstream(res.status, body, ctx.auth.key) ?? `HTTP ${res.status} ${body.slice(0, 120)}`)
-          }
-          const body = await res.json()
-          // Models whose policy is "disabled" need a one-time enable (VS Code model picker or
-          // GitHub Copilot settings) before the API will serve them, so hide them.
-          const available = new Set<string>(
-            (body?.data ?? []).filter((m: any) => m?.policy?.state !== "disabled").map((m: any) => m.id),
-          )
-          const disabled = (body?.data ?? []).filter((m: any) => m?.policy?.state === "disabled").map((m: any) => m.id)
-          const kept = Object.fromEntries(Object.entries(provider.models).filter(([id]) => available.has(id)))
-          if (Object.keys(kept).length) {
-            log(`${Object.keys(kept).length}/${Object.keys(provider.models).length} catalogue models usable on this account (${mode} mode)` +
-              (disabled.length ? `; ${disabled.length} hidden until enabled in Copilot settings: ${disabled.join(", ")}` : ""))
-            return kept
-          }
-          return provider.models
-        } catch (e) {
-          log(`model discovery skipped: ${e instanceof Error ? e.message : e}`, "warn")
-          return provider.models
+        const found = await discover(ctx.auth.key)
+        if (!found) return provider.models
+        const kept: Record<string, any> = {}
+        for (const [id, m] of Object.entries(provider.models)) if (found.usable.has(id)) kept[id] = m
+        for (const [id, m] of found.usable) {
+          if (kept[id] || !m.model_picker_enabled) continue
+          kept[id] = toConfigModel({ ...fromApiModel(m), cost: inheritCost(id, provider.models) })
         }
+        return Object.keys(kept).length ? kept : provider.models
       },
     },
 

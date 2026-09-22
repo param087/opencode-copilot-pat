@@ -59,7 +59,7 @@ COPILOT_PAT=github_pat_… ./install.sh
 
 The script copies `copilot-pat.ts` to `~/.config/opencode/plugin/`, backs up
 `~/.local/share/opencode/auth.json`, adds the `copilot-pat` entry, and sends one
-test request through `copilot-pat/gpt-4.1`. It ends with `OK: PONG` when
+test request through `copilot-pat/claude-haiku-4.5`. It ends with `OK: PONG` when
 everything is wired.
 
 ### Any OS, manual (this is all the script does)
@@ -97,8 +97,8 @@ everything is wired.
 
 ```sh
 opencode models | grep ^copilot-pat/                 # models your account can use
-opencode run -m copilot-pat/gpt-4.1 "Reply with exactly: PONG" </dev/null
-opencode -m copilot-pat/gpt-4.1                      # interactive session
+opencode run -m copilot-pat/claude-haiku-4.5 "Reply with exactly: PONG" </dev/null
+opencode -m copilot-pat/claude-haiku-4.5             # interactive session
 ```
 
 Inside the TUI, `ctrl+t` (or the model picker) lists the `copilot-pat/…`
@@ -110,8 +110,8 @@ Add the two lines from `opencode.example.jsonc` to your OpenCode config
 (`~/.config/opencode/opencode.json` or `.jsonc`):
 
 ```jsonc
-"model": "copilot-pat/gpt-4.1",
-"small_model": "copilot-pat/gpt-4.1"
+"model": "copilot-pat/claude-haiku-4.5",
+"small_model": "copilot-pat/claude-haiku-4.5"
 ```
 
 Set `small_model` too, otherwise title generation keeps using whichever
@@ -126,12 +126,15 @@ model's terms. After enabling, restart OpenCode and they appear.
 
 What actually answers depends on the plan:
 
-- **Copilot Free** (tested): `gpt-4.1`, `gpt-4o`, `gpt-4o-mini`. Other listed
-  models, including Claude Haiku 4.5, answer `model_not_supported` on this
-  integration even when enabled.
+- **Copilot Free** (tested): the older `gpt-4o` family. Other listed models
+  answer `model_not_supported` on this integration even when enabled.
 - **Paid plans** (Pro, Pro+, Business, Enterprise): the Copilot CLI's full
   model set is expected, including the Claude and GPT-5 families. Not tested
   here, reports welcome.
+
+Whatever `/models` returns for your account is what you get, so the newest
+models appear as soon as GitHub serves them to you. Run `opencode models` (or
+open the model picker) to see the current list.
 
 ## Updating or removing
 
@@ -147,7 +150,7 @@ What actually answers depends on the plan:
 Run once with logs and read the plugin's lines:
 
 ```sh
-opencode run -m copilot-pat/gpt-4.1 --print-logs "Reply with exactly: PONG" </dev/null 2>&1 | grep copilot-pat
+opencode run -m copilot-pat/claude-haiku-4.5 --print-logs "Reply with exactly: PONG" </dev/null 2>&1 | grep copilot-pat
 ```
 
 | symptom | cause and fix |
@@ -173,8 +176,17 @@ Environment overrides, all optional:
   cached models.dev data (falls back to models.dev, then a small stub list) and
   registers it under `copilot-pat`, using OpenCode's bundled
   `@ai-sdk/github-copilot`.
-- **`provider.models` hook:** fetches `/models` from the Copilot API and keeps
-  only the catalogue entries your account can use.
+- **`provider.models` hook:** fetches `/models` from the Copilot API, keeps only
+  the catalogue entries your account can use, and adds any chat models the API
+  serves that the catalogue does not list yet. So newly released models (for
+  example a fresh Claude Opus) show up without waiting for models.dev to catch
+  up; their name, context window, vision and tool-call support are read from the
+  API response, and prices are borrowed from the closest catalogue sibling
+  (`claude-opus-5.5` from `claude-opus-5`, say).
+- **Prices:** models carry the underlying vendor's models.dev list rates for
+  input, output, cache read and cache write. Copilot bills premium requests
+  rather than tokens, so treat the figures OpenCode shows as a way to compare
+  models, not as your bill.
 - **`auth.loader`:** installs a custom `fetch` that sets
   `Authorization: Bearer <token>` and `Copilot-Integration-Id: copilot-developer-cli`
   on every request, plus the `x-initiator` and vision headers Copilot expects.

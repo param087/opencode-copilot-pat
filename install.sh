@@ -41,14 +41,14 @@ PY
 unset TOKEN
 
 if [ "$VERIFY" = 1 ]; then
-  echo "verifying with copilot-pat/gpt-4.1 …"
+  echo "verifying with copilot-pat/claude-haiku-4.5 …"
   # stdin must be closed: `opencode run` otherwise waits on an open pipe.
-  if OUT="$(opencode run -m copilot-pat/gpt-4.1 "Reply with exactly: PONG" </dev/null 2>/dev/null)" && printf '%s' "$OUT" | grep -q PONG; then
+  if OUT="$(opencode run -m copilot-pat/claude-haiku-4.5 "Reply with exactly: PONG" </dev/null 2>/dev/null)" && printf '%s' "$OUT" | grep -q PONG; then
     echo "OK: $OUT"
   else
     echo "verification did not return PONG. Run this for details:"
-    echo "  opencode run -m copilot-pat/gpt-4.1 --print-logs 'Reply with exactly: PONG' </dev/null 2>&1 | grep copilot-pat"
+    echo "  opencode run -m copilot-pat/claude-haiku-4.5 --print-logs 'Reply with exactly: PONG' </dev/null 2>&1 | grep copilot-pat"
     exit 1
   fi
 fi
-echo "done. Try:  opencode -m copilot-pat/gpt-4.1     or set \"model\" as in opencode.example.jsonc"
+echo "done. Try:  opencode -m copilot-pat/claude-haiku-4.5     or set \"model\" as in opencode.example.jsonc"
